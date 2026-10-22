@@ -101,3 +101,12 @@ stress_all:
   xi_effect: 0.3333333333333333
   eta_noise: 1.25
   alpha_alignment: 0.0
+
+# Full randomization: e(X)=0.5 for every unit (kappa_overlap=0), the constant-propensity
+# control for the fitted-logistic assignment (review: chance imbalance -> synthetic confounding).
+randomized:
+  kappa_overlap: 0.0
+  gamma_hetero: 1.0
+  xi_effect: 1.0
+  eta_noise: 1.0
+  alpha_alignment: 1.0

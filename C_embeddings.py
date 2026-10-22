@@ -84,6 +84,8 @@ oracle  = pl.read_parquet(f"{ORACLE_DIR}/semi_synthetic.parquet")
 with open(f"{ORACLE_DIR}/causal_params.json") as f:
     cp = json.load(f)
 ood_sources = cp.get("ood_sources", [])
+# OOD fit units; subject_split.py sets "train" so the scored val/test units are held out of the fit.
+ood_fit_sources = cp.get("ood_fit_sources", ood_sources)
 outcome_type = cp.get("outcome_type", "binary")
 x_varies_by_seed = cp.get("x_varies_by_seed", False)
 
@@ -373,9 +375,9 @@ run_embeddings(EMB_DIR, X_ref, stage_seed_targets(id_fit_indices), outcome_type,
                x_varies_by_seed=x_varies_by_seed, X_fit_by_seed=X_ref_by_seed, X_transform_by_seed=X_ref_by_seed)
 
 if X_ood.shape[0] > 0:
-    print(f"\n3. OOD embeddings (fit on {'/'.join(ood_sources)} only, transform all)")
-    ood_fit_indices = np.where(np.isin(source, ood_sources))[0]
-    run_embeddings(EMB_OOD_DIR, X_ood, stage_seed_targets(ood_fit_indices), outcome_type, args.skip_existing, K_GRID, d_trial,
+    print(f"\n3. OOD embeddings (fit on {'/'.join(ood_fit_sources)} only, transform all)")
+    ood_fit_indices = np.where(np.isin(source, ood_fit_sources))[0]
+    run_embeddings(EMB_OOD_DIR, X_ref[ood_fit_indices], stage_seed_targets(ood_fit_indices), outcome_type, args.skip_existing, K_GRID, d_trial,
                    x_varies_by_seed=x_varies_by_seed, X_fit_by_seed=X_ood_by_seed, X_transform_by_seed=X_ref_by_seed)
 
 print("\nDone.")

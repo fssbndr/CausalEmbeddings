@@ -329,7 +329,17 @@ def load_block_table() -> pd.DataFrame:
     melted["base"] = lb.map(lambda t: t[1])
     melted["is_raw"] = melted["method"] == "raw"
 
-    return melted.dropna(subset=["PEHE"]).reset_index(drop=True)
+    melted = melted.dropna(subset=["PEHE"])
+
+    # Three-way subject split (large trials): diagnostics from the val-scored evaluation, PEHE from the
+    # test-scored one, joined per embedding. Only the OOD (held-out) evaluations are used.
+    held = melted["preset"].isin(["subject_val", "subject_test"])
+    val, test = (melted[held & (melted["preset"] == p) & (melted["distribution"] == "OOD")] for p in ("subject_val", "subject_test"))
+    key = ["trial", "distribution", "embedding", "learner", "base"]
+    joined = val.drop(columns="PEHE").merge(test[key + ["PEHE"]], on=key).assign(preset="subject_3way")
+    melted = pd.concat([melted[~held], joined], ignore_index=True)
+
+    return melted.reset_index(drop=True)
 
 
 def block_kendall_tau(df: pd.DataFrame, diagnostics: list[str] = DIAGNOSTIC_COLS) -> pd.DataFrame:
@@ -543,21 +553,39 @@ def run_critical_difference(regret_df: pd.DataFrame, diagnostics: list[str] = DI
     return result, wide, n_dropped
 
 
+def _trial_cv_tau(trials) -> pd.Series:
+    """Realized CV(tau)=sd(tau)/|mean(tau)| per trial from the baseline oracle's true_tau
+    (first seed; X is shared across seeds for the fixed-X families)."""
+    out = {}
+    for t in trials:
+        f = Path("data/oracles") / t / "semi_synthetic.parquet"
+        if not f.exists():
+            continue
+        d = pd.read_parquet(f, columns=["seed", "true_tau"])
+        tau = d.loc[d["seed"] == d["seed"].min(), "true_tau"]
+        out[t] = tau.std() / max(abs(tau.mean()), 1e-12)
+    return pd.Series(out)
+
+
 def selection_regret_breakdown(block_df: pd.DataFrame, diagnostics: list[str] = DIAGNOSTIC_COLS) -> dict:
     """Headline stratum `baseline` (baseline knob preset only) plus row-filtered strata of
     it -- one per relative capacity rho, and fitted-vs-nonfitted assignment. Each NON-baseline
     knob preset is also emitted, computed on that preset's own blocks, as an appendix
     robustness check (not part of the headline). A per-base-learner split appears only once a
     multi-base CATE run exists."""
-    tau_full = block_kendall_tau(block_df, diagnostics)
-    regret_full = block_selection_regret(block_df, diagnostics)
-    tau_b = tau_full[tau_full["preset"] == "baseline"]
-    regret_b = regret_full[regret_full["preset"] == "baseline"]
+    # In-distribution only: a VASST OOD run (databases held out) also sits under the baseline preset.
+    # The subject_3way blocks are held-out individuals (OOD path) by construction, so they stay.
+    keep = lambda d: d[(d["distribution"] == "ID") | (d["preset"] == "subject_3way")]
+    tau_full = keep(block_kendall_tau(block_df, diagnostics))
+    regret_full = keep(block_selection_regret(block_df, diagnostics))
+    tau_all = tau_full[tau_full["preset"] == "baseline"]
+    regret_all = regret_full[regret_full["preset"] == "baseline"]
+    tau_b, regret_b = tau_all[tau_all["base"] == "lr"], regret_all[regret_all["base"] == "lr"]  # headline stays lr
 
     strata = {"baseline": (tau_b, regret_b)}
     if block_df["base"].nunique() > 1:  # only meaningful once a multi-base CATE run exists
         for base in sorted(block_df["base"].unique()):
-            strata[f"base={base}"] = (tau_b[tau_b["base"] == base], regret_b[regret_b["base"] == base])
+            strata[f"base={base}"] = (tau_all[tau_all["base"] == base], regret_all[regret_all["base"] == base])
 
     # Relative-capacity strata of the baseline headline: does the diagnostic ranking hold
     # across rho = k/d? rho is a 7-point grid (RELATIVE_RATIOS) -- plain groupby, no binning.
@@ -573,10 +601,22 @@ def selection_regret_breakdown(block_df: pd.DataFrame, diagnostics: list[str] = 
         strata["assignment=nonfitted"] = (tau_b[m_tau], regret_b[m_reg])
         strata["assignment=fitted"] = (tau_b[~m_tau], regret_b[~m_reg])
 
+    # Heterogeneity check (baseline only): the fitted oracles shrink tau toward the ATE, so
+    # many trials are near-constant and ranking by PEHE partly rewards recovering a constant.
+    # Median split on realized CV(tau): does the lead hold where tau actually varies?
+    cv = _trial_cv_tau(set(block_df["trial"]))
+    if len(cv) >= 2:
+        hi = set(cv[cv >= cv.median()].index)
+        m_tau, m_reg = tau_b["trial"].isin(hi), regret_b["trial"].isin(hi)
+        strata["het=high_cv_tau"] = (tau_b[m_tau], regret_b[m_reg])
+        strata["het=low_cv_tau"] = (tau_b[~m_tau], regret_b[~m_reg])
+
     # Appendix robustness: each non-baseline knob preset, on its own blocks.
     for preset in sorted(p for p in block_df["preset"].unique() if p != "baseline"):
-        strata[f"preset={preset}"] = (tau_full[tau_full["preset"] == preset],
-                                       regret_full[regret_full["preset"] == preset])
+        # lr only, like the headline: a preset evaluated with default bases would otherwise pool lr+poly2+gbm blocks
+        sub_tau = tau_full[(tau_full["preset"] == preset) & (tau_full["base"] == "lr")]
+        sub_reg = regret_full[(regret_full["preset"] == preset) & (regret_full["base"] == "lr")]
+        strata[f"preset={preset}"] = (sub_tau, sub_reg)
 
     results = {}
     for name, (tau_df, regret_df) in strata.items():
